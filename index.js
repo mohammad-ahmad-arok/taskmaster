@@ -7,10 +7,7 @@ require('dotenv').config();
 app.use(express.json());
 
 
-app.use(cors({
-    origin: 'https://taskmaster.devedupai.com',
-    credentials: true,
-}));
+app.use(cors());
 
 // auth Route
 const authRoutes = require('./routes/auth.routes');
