@@ -8,7 +8,7 @@ app.use(express.json());
 
 
 app.use(cors({
-    origin: 'https://taskmaster.devedupai.com/',
+    origin: 'https://taskmaster.devedupai.com',
     credentials: true,
 }));
 
