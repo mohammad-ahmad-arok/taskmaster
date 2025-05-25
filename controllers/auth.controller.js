@@ -52,5 +52,12 @@ exports.getCurrentUser = (req, res) => {
 
 // logout
 exports.logout = (req, res) => {
-    res.json({ message: 'Logged out' });
+  req.session.destroy(err => {
+    if (err) {
+      console.error('Logout error:', err);
+      return res.status(500).json({ message: 'Failed to logout' });
+    }
+    res.clearCookie('connect.sid'); 
+    res.json({ message: 'Logged out successfully' });
+  });
 };
