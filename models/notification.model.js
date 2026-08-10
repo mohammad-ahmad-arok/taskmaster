@@ -1,60 +1,53 @@
 const db = require('../config/db');
 
+// Notifications are addressed by (role_table, role_id) — matches the
+// separated role tables instead of a single user id space.
 const Notification = {
-    // Get all notifications for a user
-    getByUserId: (userId, callback) => {
-        const query = `
-            SELECT * FROM notifications 
-            WHERE user_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT 50
-        `;
-        db.query(query, [userId], callback);
-    },
-
-    // Get unread count for a user
-    getUnreadCount: (userId, callback) => {
+    getByRecipient: (roleTable, roleId, callback) => {
         db.query(
-            'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0',
-            [userId],
+            'SELECT * FROM notifications WHERE role_table = ? AND role_id = ? ORDER BY created_at DESC LIMIT 50',
+            [roleTable, roleId],
             callback
         );
     },
 
-    // Create notification
+    getUnreadCount: (roleTable, roleId, callback) => {
+        db.query(
+            'SELECT COUNT(*) as count FROM notifications WHERE role_table = ? AND role_id = ? AND is_read = 0',
+            [roleTable, roleId],
+            callback
+        );
+    },
+
     create: (notification, callback) => {
         db.query('INSERT INTO notifications SET ?', notification, callback);
     },
 
-    // Create bulk notifications (for multiple users)
     createBulk: (notifications, callback) => {
         if (!notifications || notifications.length === 0) return callback(null, []);
-        const query = 'INSERT INTO notifications (user_id, type, title, message, task_id, is_read, created_at) VALUES ?';
+        const query = 'INSERT INTO notifications (role_table, role_id, type, title, message, task_id, is_read, created_at) VALUES ?';
         const values = notifications.map(n => [
-            n.user_id, n.type, n.title, n.message, n.task_id || null, 0, new Date()
+            n.role_table, n.role_id, n.type, n.title, n.message, n.task_id || null, 0, new Date()
         ]);
         db.query(query, [values], callback);
     },
 
-    // Mark notification as read
-    markAsRead: (notificationId, userId, callback) => {
+    markAsRead: (notificationId, roleTable, roleId, callback) => {
         db.query(
-            'UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?',
-            [notificationId, userId],
+            'UPDATE notifications SET is_read = 1 WHERE id = ? AND role_table = ? AND role_id = ?',
+            [notificationId, roleTable, roleId],
             callback
         );
     },
 
-    // Mark all notifications as read for a user
-    markAllAsRead: (userId, callback) => {
+    markAllAsRead: (roleTable, roleId, callback) => {
         db.query(
-            'UPDATE notifications SET is_read = 1 WHERE user_id = ?',
-            [userId],
+            'UPDATE notifications SET is_read = 1 WHERE role_table = ? AND role_id = ?',
+            [roleTable, roleId],
             callback
         );
     },
 
-    // Delete old read notifications (cleanup)
     deleteOldRead: (callback) => {
         db.query(
             'DELETE FROM notifications WHERE is_read = 1 AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)',

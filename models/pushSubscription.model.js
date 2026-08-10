@@ -1,69 +1,52 @@
 const db = require('../config/db');
 
 const PushSubscription = {
-    // Save or update a subscription for a user
-    upsert: (userId, subscription, callback) => {
+    upsert: (roleTable, roleId, subscription, callback) => {
         const endpoint = subscription.endpoint;
         const p256dh = subscription.keys?.p256dh || '';
         const auth = subscription.keys?.auth || '';
 
-        // Check if endpoint already exists
         db.query('SELECT id FROM push_subscriptions WHERE endpoint = ?', [endpoint], (err, results) => {
             if (err) return callback(err);
 
             if (results.length > 0) {
-                // Update existing
                 db.query(
-                    'UPDATE push_subscriptions SET user_id = ?, p256dh = ?, auth = ?, updated_at = NOW() WHERE endpoint = ?',
-                    [userId, p256dh, auth, endpoint],
+                    'UPDATE push_subscriptions SET role_table = ?, role_id = ?, p256dh = ?, auth = ?, updated_at = NOW() WHERE endpoint = ?',
+                    [roleTable, roleId, p256dh, auth, endpoint],
                     callback
                 );
             } else {
-                // Insert new
                 db.query(
-                    'INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?)',
-                    [userId, endpoint, p256dh, auth],
+                    'INSERT INTO push_subscriptions (role_table, role_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?, ?)',
+                    [roleTable, roleId, endpoint, p256dh, auth],
                     callback
                 );
             }
         });
     },
 
-    // Get all subscriptions for a user
-    getByUserId: (userId, callback) => {
-        db.query(
-            'SELECT * FROM push_subscriptions WHERE user_id = ?',
-            [userId],
-            callback
-        );
+    getByRecipient: (roleTable, roleId, callback) => {
+        db.query('SELECT * FROM push_subscriptions WHERE role_table = ? AND role_id = ?', [roleTable, roleId], callback);
     },
 
-    // Get all subscriptions for multiple users
-    getByUserIds: (userIds, callback) => {
-        if (!userIds || userIds.length === 0) return callback(null, []);
-        db.query(
-            'SELECT * FROM push_subscriptions WHERE user_id IN (?)',
-            [userIds],
-            callback
-        );
+    getByRecipients: (recipients, callback) => {
+        // recipients: [{ roleTable, roleId }, ...]
+        if (!recipients || recipients.length === 0) return callback(null, []);
+        const clauses = recipients.map(() => '(role_table = ? AND role_id = ?)').join(' OR ');
+        const params = recipients.flatMap(r => [r.roleTable, r.roleId]);
+        db.query(`SELECT * FROM push_subscriptions WHERE ${clauses}`, params, callback);
     },
 
-    // Get subscriptions for all managers
     getManagerSubscriptions: (callback) => {
-        db.query(
-            "SELECT ps.* FROM push_subscriptions ps JOIN user u ON u.id = ps.user_id WHERE u.role = 'manager'",
-            callback
-        );
+        db.query("SELECT * FROM push_subscriptions WHERE role_table = 'team_managers'", callback);
     },
 
-    // Delete a subscription by endpoint (when push fails)
     deleteByEndpoint: (endpoint, callback) => {
         db.query('DELETE FROM push_subscriptions WHERE endpoint = ?', [endpoint], callback);
     },
 
-    // Delete all subscriptions for a user
-    deleteByUserId: (userId, callback) => {
-        db.query('DELETE FROM push_subscriptions WHERE user_id = ?', [userId], callback);
+    deleteByRecipient: (roleTable, roleId, callback) => {
+        db.query('DELETE FROM push_subscriptions WHERE role_table = ? AND role_id = ?', [roleTable, roleId], callback);
     }
 };
 

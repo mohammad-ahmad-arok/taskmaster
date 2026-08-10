@@ -1,44 +1,10 @@
 const db = require('../config/db');
 const Notification = require('../models/notification.model');
-const { sendPushToUser, sendPushToUsers, sendPushToManagers, notifyUser } = require('./pushService');
+const { sendPushToRecipients } = require('./pushService');
+const { taskUrlForRoleTable } = require('./taskUrl');
 
-// ─── Save to DB + Send push ──────────────────────────────────────────────────
-const saveAndPush = async (notificationData) => {
-    return new Promise((resolve, reject) => {
-        const row = {
-            user_id: notificationData.user_id,
-            type: notificationData.type,
-            title: notificationData.title,
-            message: notificationData.message,
-            task_id: notificationData.task_id || null,
-            is_read: 0,
-            created_at: new Date()
-        };
-        Notification.create(row, async (err, result) => {
-            if (err) return reject(err);
-
-            // Fire-and-forget push
-            const payload = {
-                title: notificationData.title,
-                body: notificationData.message,
-                icon: '/icon-192.png',
-                badge: '/icon-192.png',
-                data: {
-                    taskId: notificationData.task_id || null,
-                    type: notificationData.type,
-                    notificationId: result.insertId,
-                    url: notificationData.task_id
-                        ? `/tasks/${notificationData.task_id}`
-                        : '/'
-                }
-            };
-            sendPushToUser(notificationData.user_id, payload).catch(() => {});
-            resolve(result);
-        });
-    });
-};
-
-// ─── Bulk save + push ────────────────────────────────────────────────────────
+// ─── Save to DB + Send push (bulk) ───────────────────────────────────────────
+// notifications: [{ role_table, role_id, type, title, message, task_id }]
 const saveAndPushBulk = async (notifications) => {
     if (!notifications || notifications.length === 0) return;
 
@@ -46,13 +12,13 @@ const saveAndPushBulk = async (notifications) => {
         Notification.createBulk(notifications, async (err) => {
             if (err) return reject(err);
 
-            // Group by user and push
-            const byUser = {};
+            const byRecipient = new Map();
             for (const n of notifications) {
-                if (!byUser[n.user_id]) byUser[n.user_id] = n;
+                const key = `${n.role_table}:${n.role_id}`;
+                if (!byRecipient.has(key)) byRecipient.set(key, n);
             }
 
-            for (const [userId, n] of Object.entries(byUser)) {
+            for (const n of byRecipient.values()) {
                 const payload = {
                     title: n.title,
                     body: n.message,
@@ -61,44 +27,51 @@ const saveAndPushBulk = async (notifications) => {
                     data: {
                         taskId: n.task_id || null,
                         type: n.type,
-                        url: n.task_id ? `/tasks/${n.task_id}` : '/'
-                    }
+                        url: taskUrlForRoleTable(n.role_table, n.task_id),
+                    },
                 };
-                sendPushToUser(parseInt(userId), payload).catch(() => {});
+                sendPushToRecipients([{ roleTable: n.role_table, roleId: n.role_id }], payload).catch(() => {});
             }
             resolve();
         });
     });
 };
 
+const saveAndPush = async (notification) => saveAndPushBulk([notification]);
+
+// Fetch all team managers (optionally excluding one), used as the
+// "stakeholders who should hear about this" group throughout.
+const getManagers = (excludeId) => new Promise((resolve, reject) => {
+    const sql = excludeId
+        ? 'SELECT id FROM team_managers WHERE id != ?'
+        : 'SELECT id FROM team_managers';
+    db.query(sql, excludeId ? [excludeId] : [], (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows.map(r => ({ role_table: 'team_managers', role_id: r.id })));
+    });
+});
+
 // ─── Task Created ────────────────────────────────────────────────────────────
 const notifyTaskCreated = async (task, creatorId) => {
     try {
-        const notifications = [];
+        const notifications = [
+            {
+                role_table: 'employees', role_id: task.assignedTo,
+                type: 'task_assigned',
+                title: '📋 مهمة جديدة تم تعيينها لك',
+                message: `تم تعيين مهمة "${task.title}" في مشروع "${task.projectName}" لك. الموعد النهائي: ${new Date(task.deadline).toLocaleDateString('ar-SA')}`,
+                task_id: task.id,
+            },
+        ];
 
-        notifications.push({
-            user_id: task.assignedTo,
-            type: 'task_assigned',
-            title: '📋 مهمة جديدة تم تعيينها لك',
-            message: `تم تعيين مهمة "${task.title}" في مشروع "${task.projectName}" لك. الموعد النهائي: ${new Date(task.deadline).toLocaleDateString('ar-SA')}`,
-            task_id: task.id
-        });
-
-        await new Promise((resolve, reject) => {
-            db.query("SELECT id FROM user WHERE role = 'manager' AND id != ?", [creatorId], (err, managers) => {
-                if (err) return reject(err);
-                managers.forEach(m => {
-                    notifications.push({
-                        user_id: m.id,
-                        type: 'task_created',
-                        title: '✅ مهمة جديدة تم إنشاؤها',
-                        message: `تم إنشاء مهمة "${task.title}" وتعيينها لـ ${task.assignedToName} في مشروع "${task.projectName}"`,
-                        task_id: task.id
-                    });
-                });
-                resolve();
-            });
-        });
+        const managers = await getManagers(creatorId);
+        managers.forEach(m => notifications.push({
+            role_table: m.role_table, role_id: m.role_id,
+            type: 'task_created',
+            title: '✅ مهمة جديدة تم إنشاؤها',
+            message: `تم إنشاء مهمة "${task.title}" وتعيينها لـ ${task.assignedToName} في مشروع "${task.projectName}"`,
+            task_id: task.id,
+        }));
 
         await saveAndPushBulk(notifications);
     } catch (err) {
@@ -109,35 +82,24 @@ const notifyTaskCreated = async (task, creatorId) => {
 // ─── Task Deleted ────────────────────────────────────────────────────────────
 const notifyTaskDeleted = async (taskId, taskTitle, assignedToId, assignedToName) => {
     try {
-        const notifications = [];
+        const notifications = [
+            {
+                role_table: 'employees', role_id: assignedToId,
+                type: 'task_deleted',
+                title: '🗑️ تم حذف مهمة معيّنة لك',
+                message: `تم حذف المهمة "${taskTitle}" التي كانت معيّنة لك.`,
+                task_id: null,
+            },
+        ];
 
-        // Notify assigned employee
-        notifications.push({
-            user_id: assignedToId,
+        const managers = await getManagers();
+        managers.forEach(m => notifications.push({
+            role_table: m.role_table, role_id: m.role_id,
             type: 'task_deleted',
-            title: '🗑️ تم حذف مهمة معيّنة لك',
-            message: `تم حذف المهمة "${taskTitle}" التي كانت معيّنة لك.`,
-            task_id: null
-        });
-
-        // Notify managers
-        await new Promise((resolve, reject) => {
-            db.query("SELECT id FROM user WHERE role = 'manager'", (err, managers) => {
-                if (err) return reject(err);
-                managers.forEach(m => {
-                    if (m.id !== assignedToId) {
-                        notifications.push({
-                            user_id: m.id,
-                            type: 'task_deleted',
-                            title: '🗑️ تم حذف مهمة',
-                            message: `تم حذف مهمة "${taskTitle}" التي كانت معيّنة لـ ${assignedToName}.`,
-                            task_id: null
-                        });
-                    }
-                });
-                resolve();
-            });
-        });
+            title: '🗑️ تم حذف مهمة',
+            message: `تم حذف مهمة "${taskTitle}" التي كانت معيّنة لـ ${assignedToName}.`,
+            task_id: null,
+        }));
 
         await saveAndPushBulk(notifications);
     } catch (err) {
@@ -148,33 +110,23 @@ const notifyTaskDeleted = async (taskId, taskTitle, assignedToId, assignedToName
 // ─── Note Added ──────────────────────────────────────────────────────────────
 const notifyNoteAdded = async (taskId, noteAuthorName, noteAuthorId, content) => {
     try {
-        await new Promise((resolve, reject) => {
-            db.query('SELECT * FROM task WHERE id = ?', [taskId], async (err, results) => {
-                if (err || results.length === 0) return reject(err || new Error('Task not found'));
-                const task = results[0];
+        db.query('SELECT * FROM task WHERE id = ?', [taskId], async (err, results) => {
+            if (err || results.length === 0) return;
+            const task = results[0];
 
-                const stakeholdersQuery = `
-                    SELECT DISTINCT id FROM user WHERE role = 'manager'
-                    UNION
-                    SELECT ? as id
-                `;
-                db.query(stakeholdersQuery, [task.assignedTo], async (err2, users) => {
-                    if (err2) return reject(err2);
+            const managers = await getManagers();
+            const stakeholders = [...managers, { role_table: 'employees', role_id: task.assignedTo }]
+                .filter(s => !(s.role_table === 'employees' && s.role_id === noteAuthorId));
 
-                    const notifications = users
-                        .filter(u => u.id !== noteAuthorId)
-                        .map(u => ({
-                            user_id: u.id,
-                            type: 'note_added',
-                            title: '💬 ملاحظة جديدة على مهمة',
-                            message: `أضاف ${noteAuthorName} ملاحظة على مهمة "${task.title}": "${content.substring(0, 80)}${content.length > 80 ? '...' : ''}"`,
-                            task_id: taskId
-                        }));
+            const notifications = stakeholders.map(s => ({
+                role_table: s.role_table, role_id: s.role_id,
+                type: 'note_added',
+                title: '💬 ملاحظة جديدة على مهمة',
+                message: `أضاف ${noteAuthorName} ملاحظة على مهمة "${task.title}": "${content.substring(0, 80)}${content.length > 80 ? '...' : ''}"`,
+                task_id: taskId,
+            }));
 
-                    await saveAndPushBulk(notifications);
-                    resolve();
-                });
-            });
+            await saveAndPushBulk(notifications);
         });
     } catch (err) {
         console.error('notifyNoteAdded error:', err);
@@ -187,36 +139,30 @@ const notifyStatusChanged = async (taskId, newStatus, changedByUserId) => {
         const statusLabels = {
             'pending': 'قيد الانتظار',
             'in-progress': 'قيد التنفيذ',
+            'pending-internal-review': 'بانتظار المراجعة الداخلية',
+            'pending-client-approval': 'بانتظار موافقة العميل',
             'completed': 'مكتملة ✅',
-            'blocked': 'محظورة 🚫'
+            'blocked': 'محظورة 🚫',
+            'rejected': 'مرفوضة - تحتاج تعديل ✏️',
         };
 
-        await new Promise((resolve, reject) => {
-            db.query('SELECT * FROM task WHERE id = ?', [taskId], async (err, results) => {
-                if (err || results.length === 0) return reject(err);
-                const task = results[0];
+        db.query('SELECT * FROM task WHERE id = ?', [taskId], async (err, results) => {
+            if (err || results.length === 0) return;
+            const task = results[0];
 
-                const stakeholdersQuery = `
-                    SELECT DISTINCT id FROM user WHERE role = 'manager'
-                    UNION SELECT ? as id
-                `;
-                db.query(stakeholdersQuery, [task.assignedTo], async (err2, users) => {
-                    if (err2) return reject(err2);
+            const managers = await getManagers();
+            const stakeholders = [...managers, { role_table: 'employees', role_id: task.assignedTo }]
+                .filter(s => !(s.role_id === changedByUserId));
 
-                    const notifications = users
-                        .filter(u => u.id !== changedByUserId)
-                        .map(u => ({
-                            user_id: u.id,
-                            type: 'status_changed',
-                            title: '🔄 تحديث حالة المهمة',
-                            message: `تم تغيير حالة مهمة "${task.title}" إلى "${statusLabels[newStatus] || newStatus}"`,
-                            task_id: taskId
-                        }));
+            const notifications = stakeholders.map(s => ({
+                role_table: s.role_table, role_id: s.role_id,
+                type: 'status_changed',
+                title: '🔄 تحديث حالة المهمة',
+                message: `تم تغيير حالة مهمة "${task.title}" إلى "${statusLabels[newStatus] || newStatus}"`,
+                task_id: taskId,
+            }));
 
-                    await saveAndPushBulk(notifications);
-                    resolve();
-                });
-            });
+            await saveAndPushBulk(notifications);
         });
     } catch (err) {
         console.error('notifyStatusChanged error:', err);
@@ -226,26 +172,20 @@ const notifyStatusChanged = async (taskId, newStatus, changedByUserId) => {
 // ─── Extension Request ───────────────────────────────────────────────────────
 const notifyExtensionRequest = async (taskId, requesterName) => {
     try {
-        await new Promise((resolve, reject) => {
-            db.query('SELECT * FROM task WHERE id = ?', [taskId], async (err, results) => {
-                if (err || results.length === 0) return reject(err);
-                const task = results[0];
+        db.query('SELECT * FROM task WHERE id = ?', [taskId], async (err, results) => {
+            if (err || results.length === 0) return;
+            const task = results[0];
 
-                db.query("SELECT id FROM user WHERE role = 'manager'", async (err2, managers) => {
-                    if (err2) return reject(err2);
+            const managers = await getManagers();
+            const notifications = managers.map(m => ({
+                role_table: m.role_table, role_id: m.role_id,
+                type: 'extension_request',
+                title: '📅 طلب تمديد موعد مهمة',
+                message: `طلب ${requesterName} تمديداً لمهمة "${task.title}" - بانتظار موافقتك`,
+                task_id: taskId,
+            }));
 
-                    const notifications = managers.map(m => ({
-                        user_id: m.id,
-                        type: 'extension_request',
-                        title: '📅 طلب تمديد موعد مهمة',
-                        message: `طلب ${requesterName} تمديداً لمهمة "${task.title}" - بانتظار موافقتك`,
-                        task_id: taskId
-                    }));
-
-                    await saveAndPushBulk(notifications);
-                    resolve();
-                });
-            });
+            await saveAndPushBulk(notifications);
         });
     } catch (err) {
         console.error('notifyExtensionRequest error:', err);
@@ -255,22 +195,19 @@ const notifyExtensionRequest = async (taskId, requesterName) => {
 // ─── Extension Decision ──────────────────────────────────────────────────────
 const notifyExtensionDecision = async (taskId, status, requestUserId) => {
     try {
-        await new Promise((resolve, reject) => {
-            db.query('SELECT title FROM task WHERE id = ?', [taskId], async (err, results) => {
-                if (err || results.length === 0) return reject(err);
-                const task = results[0];
-                const isApproved = status === 'approved';
+        db.query('SELECT title FROM task WHERE id = ?', [taskId], async (err, results) => {
+            if (err || results.length === 0) return;
+            const task = results[0];
+            const isApproved = status === 'approved';
 
-                await saveAndPush({
-                    user_id: requestUserId,
-                    type: isApproved ? 'extension_approved' : 'extension_rejected',
-                    title: isApproved ? '✅ تمت الموافقة على طلب التمديد' : '❌ تم رفض طلب التمديد',
-                    message: isApproved
-                        ? `تمت الموافقة على طلب التمديد لمهمة "${task.title}"`
-                        : `تم رفض طلب التمديد لمهمة "${task.title}"`,
-                    task_id: taskId
-                });
-                resolve();
+            await saveAndPush({
+                role_table: 'employees', role_id: requestUserId,
+                type: isApproved ? 'extension_approved' : 'extension_rejected',
+                title: isApproved ? '✅ تمت الموافقة على طلب التمديد' : '❌ تم رفض طلب التمديد',
+                message: isApproved
+                    ? `تمت الموافقة على طلب التمديد لمهمة "${task.title}"`
+                    : `تم رفض طلب التمديد لمهمة "${task.title}"`,
+                task_id: taskId,
             });
         });
     } catch (err) {
@@ -281,22 +218,15 @@ const notifyExtensionDecision = async (taskId, status, requestUserId) => {
 // ─── Employee Added ──────────────────────────────────────────────────────────
 const notifyEmployeeAdded = async (newEmployeeName, creatorId) => {
     try {
-        await new Promise((resolve, reject) => {
-            db.query("SELECT id FROM user WHERE role = 'manager' AND id != ?", [creatorId], async (err, managers) => {
-                if (err) return reject(err);
-
-                const notifications = managers.map(m => ({
-                    user_id: m.id,
-                    type: 'employee_added',
-                    title: '👤 موظف جديد تم إضافته',
-                    message: `تم إضافة الموظف "${newEmployeeName}" إلى النظام`,
-                    task_id: null
-                }));
-
-                if (notifications.length > 0) await saveAndPushBulk(notifications);
-                resolve();
-            });
-        });
+        const managers = await getManagers(creatorId);
+        const notifications = managers.map(m => ({
+            role_table: m.role_table, role_id: m.role_id,
+            type: 'employee_added',
+            title: '👤 موظف جديد تم إضافته',
+            message: `تم إضافة الموظف "${newEmployeeName}" إلى النظام`,
+            task_id: null,
+        }));
+        if (notifications.length > 0) await saveAndPushBulk(notifications);
     } catch (err) {
         console.error('notifyEmployeeAdded error:', err);
     }

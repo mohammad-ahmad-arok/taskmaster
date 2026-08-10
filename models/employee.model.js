@@ -1,21 +1,74 @@
 const db = require('../config/db');
 
+// NOTE: internal_cost_rate is CEO-only financial data. Every query below
+// that is reachable by non-CEO roles deliberately omits that column.
+// Only getAllWithCost / getCostRate (used exclusively by the financial
+// controller, which is gated by requireRole('ceo')) select it.
+
 const Employee = {
-    getAll: callback => {
-        db.query("SELECT user.id AS user_id, user.name, user.email, employee_details.position, employee_details.department, employee_details.joined_date, task.id AS task_id, task.title, task.description, task.status, task.deadline FROM user JOIN employee_details ON user.id = employee_details.user_id LEFT JOIN task ON task.assignedTo = user.id WHERE user.role = 'employee' ORDER BY user.id;", callback);
-    },
+  getAll: (callback) => {
+    db.query(
+      `SELECT e.id AS user_id, e.name, e.email, e.position, e.department,
+              e.joined_date, e.manager_id,
+              t.id AS task_id, t.title, t.description, t.status, t.deadline
+       FROM employees e
+       LEFT JOIN task t ON t.assignedTo = e.id
+       ORDER BY e.id`,
+      callback
+    );
+  },
 
-    getOne: (id, callback) => {
-        db.query(`
-        SELECT user.id AS user_id, user.name, user.email, employee_details.position, employee_details.department, employee_details.joined_date, task.id AS task_id, task.title, task.description,task.projectId,task.projectName, task.status, task.deadline, task_notes.id AS note_id, task_notes.content, task_notes.created_at AS note_created_at FROM user JOIN employee_details ON user.id = employee_details.user_id LEFT JOIN task ON task.assignedTo = user.id LEFT JOIN task_notes ON task_notes.task_id = task.id WHERE user.role = 'employee' AND user.id = ? ORDER BY task.id, task_notes.id;
-    `, [id], callback);
-    }
+  getOne: (id, callback) => {
+    db.query(
+      `SELECT e.id AS user_id, e.name, e.email, e.position, e.department, e.joined_date,
+              t.id AS task_id, t.title, t.description, t.projectId, t.projectName,
+              t.status, t.deadline, t.isLocked, t.dependsOnTaskId,
+              tn.id AS note_id, tn.content, tn.created_at AS note_created_at
+       FROM employees e
+       LEFT JOIN task t ON t.assignedTo = e.id
+       LEFT JOIN task_notes tn ON tn.task_id = t.id
+       WHERE e.id = ?
+       ORDER BY t.id, tn.id`,
+      [id],
+      callback
+    );
+  },
 
+  getById: (id, callback) => {
+    db.query(
+      'SELECT id, name, email, position, department, joined_date, manager_id FROM employees WHERE id = ? LIMIT 1',
+      [id],
+      callback
+    );
+  },
 
-    // create: (project, callback) => {
-    //     db.query('INSERT INTO  project SET ?', project, callback);
-    // },
+  getByEmailWithSecret: (email, callback) => {
+    db.query('SELECT * FROM employees WHERE email = ? LIMIT 1', [email], callback);
+  },
+
+  create: (employee, callback) => {
+    db.query('INSERT INTO employees SET ?', employee, callback);
+  },
+
+  delete: (id, callback) => {
+    db.query('DELETE FROM `employees` WHERE id = ?', [id], callback);
+  },
+
+  updateLastLogin: (id, callback) => {
+    db.query('UPDATE employees SET last_login = NOW() WHERE id = ?', [id], callback);
+  },
+
+  // ---- CEO-only (Financial Module) -------------------------------------
+  getAllWithCost: (callback) => {
+    db.query(
+      'SELECT id, name, email, position, department, internal_cost_rate, manager_id FROM employees ORDER BY id',
+      callback
+    );
+  },
+
+  getCostRate: (id, callback) => {
+    db.query('SELECT internal_cost_rate FROM employees WHERE id = ?', [id], callback);
+  },
 };
 
 module.exports = Employee;
-

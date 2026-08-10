@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.env
+task-master.postman_collection.json
+schema_agency_erp.sql
+notifications_migration.sql

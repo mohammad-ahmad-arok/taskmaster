@@ -1,10 +1,8 @@
-const { notifyEmployeeAdded } = require('../utils/notificationHelper');
-const db = require('../config/db');
 const Employee = require('../models/employee.model');
-const bcrypt = require('bcryptjs');
+const { createAccount } = require('../utils/createAccount');
+const { notifyEmployeeAdded } = require('../utils/notificationHelper');
 
-
-// get all employee
+// get all employees (never includes internal_cost_rate — see financial.controller.js)
 exports.getAllEmployee = (req, res) => {
     Employee.getAll((err, rows) => {
         if (err) return res.status(500).json({ error: 'Database Error' });
@@ -20,6 +18,7 @@ exports.getAllEmployee = (req, res) => {
                     position: row.position,
                     department: row.department,
                     joined_date: row.joined_date,
+                    manager_id: row.manager_id,
                     tasks: []
                 };
             }
@@ -35,21 +34,23 @@ exports.getAllEmployee = (req, res) => {
             }
         });
 
-        const finalResult = Object.values(grouped);
-        res.json({ data: finalResult });
+        res.json({ data: Object.values(grouped) });
     });
 };
 
 // get employee by id
 exports.getOneEmployee = (req, res) => {
     const employeeId = req.params.id;
+    const requester = req.user;
+
+    // Employees may only view their own record; managers/QA/CEO can view any.
+    if (requester.role === 'employee' && String(requester.id) !== String(employeeId)) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+
     Employee.getOne(employeeId, (err, rows) => {
         if (err) return res.status(500).json({ error: 'Database Error' });
-
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'Employee not found' });
-        }
-
+        if (rows.length === 0) return res.status(404).json({ error: 'Employee not found' });
 
         const result = {
             user_id: rows[0].user_id,
@@ -60,7 +61,6 @@ exports.getOneEmployee = (req, res) => {
             joined_date: rows[0].joined_date,
             tasks: []
         };
-
 
         const tasksMap = {};
 
@@ -75,10 +75,11 @@ exports.getOneEmployee = (req, res) => {
                         description: row.description,
                         status: row.status,
                         deadline: row.deadline,
+                        isLocked: !!row.isLocked,
+                        dependsOnTaskId: row.dependsOnTaskId,
                         notes: []
                     };
                 }
-
 
                 if (row.note_id) {
                     tasksMap[row.task_id].notes.push({
@@ -91,88 +92,56 @@ exports.getOneEmployee = (req, res) => {
         });
 
         result.tasks = Object.values(tasksMap);
-
         res.json({ data: result });
     });
 };
 
-
-// create a new employee
+// create a new employee — thin wrapper around the shared account-creation
+// helper so employees always end up correctly in `employees` + auth_index.
 exports.addEmployee = async (req, res) => {
     const { name, email, password, position, department, joined_date } = req.body;
+    const requester = req.user;
 
     if (!name || !email || !password || !position || !department || !joined_date) {
         return res.status(400).json({ error: 'All fields are required' });
     }
 
-    db.query('SELECT id FROM user WHERE email = ?', [email], async (checkErr, existingUser) => {
-        if (checkErr) return res.status(500).json({ error: 'Database error on email check' });
-        if (existingUser.length > 0) return res.status(409).json({ error: 'Email already in use' });
+    const fields = {
+        name, email, password, position, department, joined_date,
+        internal_cost_rate: 0,
+        manager_id: requester.role === 'team_manager' ? requester.id : null,
+    };
 
-        try {
-            const hashedPassword = await bcrypt.hash(password, 10);
-
-            const userInsert = 'INSERT INTO user (name, email, password, role) VALUES (?, ?, ?, ?)';
-            db.query(userInsert, [name, email, hashedPassword, 'employee'], (userErr, userResult) => {
-                if (userErr) return res.status(500).json({ error: 'Error inserting into user table' });
-
-                const userId = userResult.insertId;
-
-                const detailsInsert = 'INSERT INTO employee_details (user_id, position, department, joined_date) VALUES (?, ?, ?, ?)';
-                db.query(detailsInsert, [userId, position, department, joined_date], (detailsErr) => {
-                    if (detailsErr) return res.status(500).json({ error: 'Error inserting into employee_details' });
-
-                    // Notify other managers
-                    const { id: creatorId } = req.user || { id: null };
-                    notifyEmployeeAdded(name, creatorId).catch(e =>
-                        console.error('Notification error (employee added):', e)
-                    );
-
-                    res.status(201).json({
-                        success: true,
-                        data: {
-                            id: userId,
-                            name,
-                            email,
-                            position,
-                            department,
-                            joined_date,
-                            tasks: []
-                        }
-                    });
-                });
-            });
-        } catch (error) {
-            res.status(500).json({ error: 'Server error during hashing' });
+    createAccount('employee', fields, (err, created) => {
+        if (err) {
+            if (err.message === 'EMAIL_IN_USE') return res.status(409).json({ error: 'Email already in use' });
+            return res.status(500).json({ error: 'Error creating employee' });
         }
-    });
-};
 
+        notifyEmployeeAdded(name, requester.id).catch(() => {});
 
-// delete employee
-exports.deleteemployee = (req, res) => {
-    const userId = req.params.id;
-
-    if (!userId) {
-        return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    // delete employee_details
-    const deleteDetailsQuery = 'DELETE FROM employee_details WHERE user_id = ?';
-    db.query(deleteDetailsQuery, [userId], (detailsErr) => {
-        if (detailsErr) return res.status(500).json({ error: 'Error deleting employee details' });
-
-        // delete user
-        const deleteUserQuery = 'DELETE FROM user WHERE id = ?';
-        db.query(deleteUserQuery, [userId], (userErr, userResult) => {
-            if (userErr) return res.status(500).json({ error: 'Error deleting user' });
-
-            if (userResult.affectedRows === 0) {
-                return res.status(404).json({ error: 'User not found' });
-            }
-
-            res.status(200).json({ message: 'User deleted successfully' });
+        res.status(201).json({
+            success: true,
+            data: { id: created.id, name, email, position, department, joined_date, tasks: [] }
         });
     });
 };
 
+// delete employee
+exports.deleteemployee = (req, res) => {
+    const employeeId = req.params.id;
+
+    if (!employeeId) {
+        return res.status(400).json({ error: 'Employee ID is required' });
+    }
+
+    Employee.delete(employeeId, (err, result) => {
+        if (err) return res.status(500).json({ error: 'Error deleting employee' });
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Employee not found' });
+
+        const AuthIndex = require('../models/authIndex.model');
+        AuthIndex.deleteByRoleRow('employees', employeeId, () => {});
+
+        res.status(200).json({ message: 'Employee deleted successfully' });
+    });
+};

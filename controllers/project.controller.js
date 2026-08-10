@@ -28,7 +28,9 @@ exports.getProjects = (req, res) => {
                     title: row.task_title,
                     description: row.task_description,
                     status: row.task_status,
-                    deadline: row.task_deadline
+                    deadline: row.task_deadline,
+                    isLocked: !!row.task_isLocked,
+                    dependsOnTaskId: row.task_dependsOnTaskId,
                 });
             }
         });
@@ -71,13 +73,15 @@ exports.getOneProject = (req, res) => {
                         assignedToName: row.task_assignedToName,
                         status: row.task_status,
                         deadline: row.task_deadline,
+                        isLocked: !!row.task_isLocked,
+                        dependsOnTaskId: row.task_dependsOnTaskId,
+                        actualTimeSpentSeconds: row.task_actualTimeSpentSeconds,
                         extensionRequests: [],
                         notes: []
                     };
                     projectData.tasks.push(taskMap[row.task_id]);
                 }
 
-                // Add extension request
                 if (row.request_id && !taskMap[row.task_id].extensionRequests.find(r => r.id === row.request_id)) {
                     taskMap[row.task_id].extensionRequests.push({
                         id: row.request_id,
@@ -88,11 +92,13 @@ exports.getOneProject = (req, res) => {
                     });
                 }
 
-                // Add note
                 if (row.note_id && !taskMap[row.task_id].notes.find(n => n.id === row.note_id)) {
                     taskMap[row.task_id].notes.push({
                         id: row.note_id,
                         content: row.note_content,
+                        attachmentUrl: row.note_attachment_url,
+                        attachmentName: row.note_attachment_name,
+                        attachmentType: row.note_attachment_type,
                         created_at: row.note_created_at
                     });
                 }
@@ -104,14 +110,18 @@ exports.getOneProject = (req, res) => {
 };
 
 
-// create a new projects
+// create a new project (manual, no template). contractValue is accepted
+// here but only ever surfaced back out through the CEO financial endpoints.
 exports.createProjects = async (req, res) => {
-    const { name, description, startDate, endDate } = req.body;
+    const { name, description, startDate, endDate, contractValue } = req.body;
     if (!name || !description || !startDate || !endDate)
         return res.status(400).json({ error: "All fields are required" });
 
     try {
-        const newProject = { name, description, start_date: startDate, end_date: endDate };
+        const newProject = {
+            name, description, start_date: startDate, end_date: endDate,
+            contract_value: contractValue || 0,
+        };
         Project.create(newProject, (err, result) => {
             if (err) return res.status(500).json({ error: 'Error creating new Project' });
 
@@ -127,5 +137,3 @@ exports.createProjects = async (req, res) => {
         res.status(500).json({ error: 'Server error' });
     }
 };
-
-
